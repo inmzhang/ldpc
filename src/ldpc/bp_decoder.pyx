@@ -80,6 +80,10 @@ cdef class bp_decoder:
             bp_method=2
         elif str(bp_method).lower() in ['min_sum_log','minimum_sum_log','ms_log','3','minimum sum_log','msl']:
             bp_method=3
+        elif str(bp_method).lower() in ['psl_serial', '4']:
+            bp_method=4
+        elif str(bp_method).lower() in ['msl_serial', '5']:
+            bp_method=5
         else: raise ValueError(f"BP method '{bp_method}' is invalid.\
                             Please choose from the following methods:'product_sum',\
                             'minimum_sum', 'product_sum_log' or 'minimum_sum_log'")
@@ -202,6 +206,9 @@ cdef class bp_decoder:
 
         elif self.bp_method == 2 or self.bp_method==3:
             self.bp_decode_log_prob_ratios()
+        
+        elif self.bp_method == 4 or self.bp_method==5:
+            self.bp_decode_log_prob_ratios_serial()
 
         else:
             ValueError("Specified BP method is invalid.")
@@ -460,6 +467,107 @@ cdef class bp_decoder:
 
         return 0
 
+    
+    # Belief propagation with log probability ratios, serial schedule
+    cdef int bp_decode_log_prob_ratios_serial(self):
+        """
+        Cython function implementing belief propagation for log probability ratios with serial schedule.
+
+        Notes
+        -----
+        This function accepts no parameters. The syndrome must be set beforehand.
+        """
+
+        cdef mod2entry *e
+        cdef mod2entry *g
+        cdef int i, j, check, equal, iteration, sgn
+        cdef double bit_to_check0, temp, alpha
+
+        #initialisation
+
+        for j in range(self.n):
+            e=mod2sparse_first_in_col(self.H,j)
+            while not mod2sparse_at_end(e):
+                e.bit_to_check=log((1-self.channel_probs[j])/self.channel_probs[j])
+                e=mod2sparse_next_in_col(e)
+
+        self.converge=0
+        for iteration in range(1,self.max_iter+1):
+
+            self.iter=iteration
+            if self.bp_method==5:
+                if self.ms_scaling_factor==0:
+                    alpha = 1.0 - 2**(-1*iteration/1.0)
+                else: alpha = self.ms_scaling_factor
+
+            for j in range(self.n):
+                
+                # product sum check_to_bit messages
+                if self.bp_method==4:
+                    e = mod2sparse_first_in_col(self.H, j)
+                    while not mod2sparse_at_end(e):
+                        i = mod2sparse_row(e) 
+                        g = mod2sparse_first_in_row(self.H, i)
+                        temp = 1.0
+                        while not mod2sparse_at_end(g):
+                            if mod2sparse_col(g) != j:
+                                temp *= tanh(g.bit_to_check/2)
+                            g = mod2sparse_next_in_row(g)
+                        e.check_to_bit = ((-1)**self.synd[i])*log((1+temp)/(1-temp))
+                        e = mod2sparse_next_in_col(e)
+                # min-sum check to bit messages
+                elif self.bp_method==5:
+                    e = mod2sparse_first_in_col(self.H, j)
+                    while not mod2sparse_at_end(e):
+                        i = mod2sparse_row(e) 
+                        g = mod2sparse_first_in_row(self.H, i)
+                        temp=1e308
+                        if self.synd[i]==1: sgn=1
+                        else: sgn=0
+
+                        while not mod2sparse_at_end(g):
+                            if mod2sparse_col(g) != j:
+                                if abs(g.bit_to_check)<temp:
+                                    temp=abs(g.bit_to_check)
+                                if g.bit_to_check <=0: sgn+=1
+                            g = mod2sparse_next_in_row(g)
+                        e.check_to_bit=((-1)**sgn)*alpha*temp
+                        e = mod2sparse_next_in_col(e)
+
+                # bit_to_check messages
+
+                e=mod2sparse_first_in_col(self.H, j)
+                temp=log((1-self.channel_probs[j])/self.channel_probs[j])
+
+                while not mod2sparse_at_end(e):
+                    e.bit_to_check = temp
+                    temp += e.check_to_bit
+                    e = mod2sparse_next_in_col(e)
+
+                self.log_prob_ratios[j]=temp
+                if temp <= 0: self.bp_decoding[j]=1
+                else: self.bp_decoding[j]=0
+
+                e=mod2sparse_last_in_col(self.H,j)
+                temp=0.0
+                while not mod2sparse_at_end(e):
+                    e.bit_to_check+=temp
+                    temp+=e.check_to_bit
+                    e=mod2sparse_prev_in_col(e)
+
+        mod2sparse_mulvec(self.H,self.bp_decoding,self.bp_decoding_synd)
+
+        equal=1
+        for check in range(self.m):
+            if self.synd[check]!=self.bp_decoding_synd[check]:
+                equal=0
+                break
+        if equal==1:
+            self.converge=1
+            return 1
+
+        return 0
+
 
     @property
     def channel_probs(self):
@@ -500,6 +608,8 @@ cdef class bp_decoder:
         elif self.bp_method==1: return "minimum_sum"
         elif self.bp_method==2: return "product_sum_log"
         elif self.bp_method==3: return "minimum_sum_log"
+        elif self.bp_method==4: return "product_sum_log_serial"
+        elif self.bp_method==5: return "minimum_sum_log_serial"
 
     @property
     def iter(self):

@@ -39,6 +39,9 @@ cdef class bp_decoder:
     # Belief propagation with log probability ratios
     cdef int bp_decode_log_prob_ratios(self)
 
+    # Belief propagation with log probability ratios , serial schedule
+    cdef int bp_decode_log_prob_ratios_serial(self)
+
 
 # cdef class bposd_decoder(bp_decoder):
 #     cdef int test
